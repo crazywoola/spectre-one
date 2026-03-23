@@ -1,0 +1,32 @@
+{
+  "name": "spectre-one",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Discord bot powered by OpenAI Responses API and Dosu MCP.",
+  "scripts": {
+    "dev": "tsx watch src/index.ts",
+    "build": "tsc -p tsconfig.json",
+    "start": "node dist/index.js",
+    "check": "tsc --noEmit"
+  },
+  "engines": {
+    "node": ">=20.0.0"
+  },
+  "dependencies": {
+    "discord.js": "^14.20.0",
+    "dotenv": "^17.2.2",
+    "openai": "^6.32.0",
+    "zod": "^4.1.5"
+  },
+  "devDependencies": {
+    "@types/node": "^24.5.2",
+    "tsx": "^4.20.5",
+    "typescript": "^5.9.2"
+  },
+  "overrides": {
+    "discord.js": {
+      "undici": "6.24.1"
+    }
+  }
+}
