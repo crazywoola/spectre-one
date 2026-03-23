@@ -1,58 +1,58 @@
 # Spectre One
 
-一个简洁的 Discord Bot，用 OpenAI `Responses API` 生成回复，并把 Dosu 作为远程 MCP tool 挂给模型，用于检索团队文档或内部知识。
+A minimal Discord bot that generates replies with the OpenAI `Responses API` and exposes Dosu to the model as a remote MCP tool for retrieving team docs or internal knowledge.
 
-## 特性
+## Features
 
-- 基于 `discord.js`，自动回复频道消息或 `@mention`
-- 基于 OpenAI `Responses API`
-- 内置 Dosu MCP 远程工具配置
-- 默认带超时、重试、日志和优雅退出
-- 空仓可直接启动，无额外框架负担
+- Built on `discord.js`, with automatic replies to channel messages or `@mentions`
+- Powered by the OpenAI `Responses API`
+- Built-in Dosu MCP remote tool configuration
+- Includes timeouts, retries, logging, and graceful shutdown by default
+- Can start from a clean repo without extra framework overhead
 
-## 前置要求
+## Prerequisites
 
 - Node.js 20+
-- 一个 Discord Bot Token
-- Discord Developer Portal 中开启 `MESSAGE CONTENT INTENT`
+- A Discord bot token
+- `MESSAGE CONTENT INTENT` enabled in the Discord Developer Portal
 - OpenAI API Key
-- Dosu deployment
+- A Dosu deployment
 
-## 安装
+## Installation
 
 ```bash
 npm install
 cp .env.example .env
 ```
 
-## Dosu 配置
+## Dosu Configuration
 
-这个项目只使用 Dosu 的 HTTP MCP 端点，不依赖 CLI 本地配置。
+This project uses only Dosu's HTTP MCP endpoint and does not depend on local CLI configuration.
 
-按 Dosu 文档，推荐使用 path-based endpoint：
+Per the Dosu docs, the recommended setup is the path-based endpoint:
 
 ```env
 DOSU_MCP_DEPLOYMENT_ID=your-deployment-id
 DOSU_MCP_API_KEY=dosu_your_api_key
 ```
 
-程序会自动构造：
+The app will automatically construct:
 
 ```text
 https://api.dosu.dev/v1/mcp/deployments/<your-deployment-id>
 ```
 
-如果你已经有完整端点，也可以直接填写：
+If you already have the full endpoint, you can also set it directly:
 
 ```env
 DOSU_MCP_SERVER_URL=https://api.dosu.dev/v1/mcp/deployments/<your-deployment-id>
 DOSU_MCP_API_KEY=dosu_your_api_key
 ```
 
-参考 Dosu 文档：
+See the Dosu docs:
 - [Dosu MCP](https://app.dosu.dev/9affd04a-e6a9-452c-b927-c639e979994c/documents/8c21ef6e-14b7-4fa1-949e-d256af54bad1)
 
-## 环境变量
+## Environment Variables
 
 ```env
 DISCORD_BOT_TOKEN=...
@@ -61,44 +61,44 @@ OPENAI_MODEL=gpt-5-mini
 DOSU_MCP_DEPLOYMENT_ID=...
 DOSU_MCP_API_KEY=...
 
-# 逗号分隔。填了以后这些频道会自动回复所有用户消息。
+# Comma-separated. When set, these channels will automatically reply to all user messages.
 DISCORD_ALLOWED_CHANNEL_IDS=123,456
 
-# 不填时的默认行为：
-# - 如果配置了 DISCORD_ALLOWED_CHANNEL_IDS，则这些频道自动回复，其他频道仅在 @bot 时回复
-# - 如果没配置频道，则默认仅在 @bot 时回复
+# Default behavior when left empty:
+# - If DISCORD_ALLOWED_CHANNEL_IDS is configured, those channels auto-reply and all other channels reply only when the bot is mentioned
+# - If no channels are configured, the bot replies only when mentioned
 DISCORD_REQUIRE_MENTION=
 ```
 
-## 启动
+## Run
 
-开发模式：
+Development mode:
 
 ```bash
 npm run dev
 ```
 
-构建并运行：
+Build and run:
 
 ```bash
 npm run build
 npm start
 ```
 
-## 结构
+## Structure
 
 ```text
 src/
-  config/      环境配置与 Dosu 读取
-  discord/     Discord 事件与上下文拼装
-  openai/      OpenAI 回复链路
-  shared/      日志、重试、文本工具
-  index.ts     入口
+  config/      Environment config and Dosu loading
+  discord/     Discord events and prompt context assembly
+  openai/      OpenAI reply pipeline
+  shared/      Logging, retries, and text utilities
+  index.ts     Entry point
 ```
 
-## 说明
+## Notes
 
-- 回复使用最近几条频道消息作为上下文，避免完全脱离对话。
-- 模型在需要内部文档时会自行调用 Dosu MCP；找不到内容时会直接说明，而不是编造。
-- 默认模型是 `gpt-5-mini`。如果你更重视质量，可以改成 `gpt-5.4`。
-- 当前 Dosu 接入方式是 HTTP MCP: `server_url + X-Dosu-API-Key`，不是 CLI 调用。
+- Replies use the most recent channel messages as context so the bot stays grounded in the conversation.
+- The bot performs a Dosu lookup before every final reply, then uses that retrieved context in the OpenAI response. If Dosu does not return enough relevant information, it says so instead of guessing.
+- The default model is `gpt-5-mini`. If you care more about quality, switch to `gpt-5.4`.
+- The current Dosu integration uses HTTP MCP: `server_url + X-Dosu-API-Key`, not the CLI.

@@ -12,7 +12,7 @@ import { splitDiscordMessage } from '../shared/text.js';
 import { buildPromptContext, shouldRespond } from './message-context.js';
 import { ReplyService } from '../openai/reply-service.js';
 
-const GENERIC_FAILURE_MESSAGE = '我这边处理消息时出了点问题，请稍后再试。';
+const GENERIC_FAILURE_MESSAGE = 'I ran into a problem while processing that message. Please try again in a moment.';
 
 export function createDiscordBot(config: AppConfig, replyService: ReplyService): Client {
   const client = new Client({

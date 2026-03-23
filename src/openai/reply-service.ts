@@ -5,11 +5,15 @@ import type { AppConfig } from '../config/env.js';
 import { logger } from '../shared/logger.js';
 import { withRetry } from '../shared/retry.js';
 
-const DOSU_PREFERRED_TOOLS = [
+const DOSU_LOOKUP_TOOLS = [
   'init_knowledge',
   'search_documentation',
   'search_threads',
-  'fetch_source',
+  'fetch_source'
+] as const;
+
+const DOSU_VERIFICATION_TOOLS = [
+  ...DOSU_LOOKUP_TOOLS,
   'greet'
 ] as const;
 
@@ -32,7 +36,21 @@ export class ReplyService {
   }
 
   public async generateReply(input: string): Promise<string> {
-    const response = await this.createResponse(this.buildReplyRequest(input));
+    const dosuLookupResponse = await this.createResponse(this.buildDosuLookupRequest(input));
+    const dosuCalls = getDosuMcpCalls(dosuLookupResponse);
+
+    if (dosuCalls.length === 0) {
+      throw new Error('OpenAI did not query Dosu before generating a reply.');
+    }
+
+    logger.info('dosu_lookup_completed', {
+      callCount: dosuCalls.length,
+      tools: dosuCalls.map((call) => call.name),
+      statuses: dosuCalls.map((call) => call.status ?? 'completed'),
+      failedTools: dosuCalls.filter((call) => call.error).map((call) => call.name)
+    });
+
+    const response = await this.createResponse(this.buildReplyRequest(dosuLookupResponse.id));
 
     const output = response.output_text.trim();
     if (!output) {
@@ -53,7 +71,7 @@ export class ReplyService {
       ].join(' '),
       stream: false,
       max_output_tokens: 20,
-      tools: [this.buildDosuMcpTool()]
+      tools: [this.buildDosuMcpTool(DOSU_VERIFICATION_TOOLS)]
     });
 
     const mcpListTools = response.output.find(isMcpListToolsItem);
@@ -67,7 +85,7 @@ export class ReplyService {
 
     const importedTools = mcpListTools.tools.map((tool) => tool.name).sort();
     const missingRequiredTools = DOSU_REQUIRED_TOOLS.filter((toolName) => !importedTools.includes(toolName));
-    const missingOptionalTools = DOSU_PREFERRED_TOOLS.filter((toolName) => !importedTools.includes(toolName));
+    const missingOptionalTools = DOSU_VERIFICATION_TOOLS.filter((toolName) => !importedTools.includes(toolName));
 
     if (missingRequiredTools.length > 0) {
       throw new Error(
@@ -89,18 +107,53 @@ export class ReplyService {
     }
   }
 
-  private buildReplyRequest(input: string): ResponseCreateParamsNonStreaming {
+  private buildDosuLookupRequest(input: string): ResponseCreateParamsNonStreaming {
     return {
       model: this.config.openai.model,
-      instructions: this.config.bot.systemPrompt,
+      instructions: [
+        'You are preparing context for a Discord bot reply.',
+        'Before any final answer is written, you must query the Dosu MCP server at least once.',
+        'Prefer search_documentation first. Use search_threads for discussion history when helpful. Use fetch_source to inspect any promising result in more detail.',
+        'Do not call greet.',
+        'Do not write a user-facing reply in this step.'
+      ].join(' '),
       input,
       stream: false,
-      max_output_tokens: 900,
-      tools: [this.buildDosuMcpTool()]
+      max_output_tokens: 300,
+      tool_choice: {
+        type: 'allowed_tools',
+        mode: 'required',
+        tools: [
+          {
+            type: 'mcp',
+            server_label: 'dosu'
+          }
+        ]
+      },
+      tools: [this.buildDosuMcpTool(DOSU_LOOKUP_TOOLS)]
     };
   }
 
-  private buildDosuMcpTool(): NonNullable<ResponseCreateParamsNonStreaming['tools']>[number] {
+  private buildReplyRequest(previousResponseId: string): ResponseCreateParamsNonStreaming {
+    return {
+      model: this.config.openai.model,
+      instructions: [
+        this.config.bot.systemPrompt,
+        'A Dosu lookup was already completed in the previous response.',
+        'Use the retrieved Dosu context before answering the user.',
+        'If the Dosu lookup failed or did not contain enough relevant information, say so plainly instead of guessing.'
+      ].join(' '),
+      input: 'Write the final Discord reply for the original user request using the Dosu lookup above.',
+      previous_response_id: previousResponseId,
+      stream: false,
+      max_output_tokens: 900,
+      tool_choice: 'none'
+    };
+  }
+
+  private buildDosuMcpTool(
+    allowedTools: readonly string[]
+  ): NonNullable<ResponseCreateParamsNonStreaming['tools']>[number] {
     return {
       type: 'mcp',
       server_label: 'dosu',
@@ -109,7 +162,7 @@ export class ReplyService {
       headers: {
         'X-Dosu-API-Key': this.config.dosu.apiKey
       },
-      allowed_tools: [...DOSU_PREFERRED_TOOLS],
+      allowed_tools: [...allowedTools],
       require_approval: 'never'
     };
   }
@@ -132,6 +185,13 @@ export class ReplyService {
 
 function isMcpListToolsItem(item: Response['output'][number]): item is Extract<Response['output'][number], { type: 'mcp_list_tools' }> {
   return item.type === 'mcp_list_tools';
+}
+
+function getDosuMcpCalls(response: Response): Array<Extract<Response['output'][number], { type: 'mcp_call' }>> {
+  return response.output.filter(
+    (item): item is Extract<Response['output'][number], { type: 'mcp_call' }> =>
+      item.type === 'mcp_call' && item.server_label === 'dosu'
+  );
 }
 
 function isRetryableError(error: unknown): boolean {
