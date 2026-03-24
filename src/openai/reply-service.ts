@@ -5,23 +5,16 @@ import type { AppConfig } from '../config/env.js';
 import { logger } from '../shared/logger.js';
 import { withRetry } from '../shared/retry.js';
 
-const DOSU_LOOKUP_TOOLS = [
-  'init_knowledge',
-  'search_documentation',
-  'search_threads',
-  'fetch_source'
-] as const;
+const DOSU_LOOKUP_TOOL = 'search_threads' as const;
+
+const DOSU_LOOKUP_TOOLS = [DOSU_LOOKUP_TOOL] as const;
 
 const DOSU_VERIFICATION_TOOLS = [
   ...DOSU_LOOKUP_TOOLS,
   'greet'
 ] as const;
 
-const DOSU_REQUIRED_TOOLS = [
-  'init_knowledge',
-  'search_documentation',
-  'fetch_source'
-] as const;
+const DOSU_REQUIRED_TOOLS = [DOSU_LOOKUP_TOOL] as const;
 
 const DEFAULT_MAX_OUTPUT_TOKENS = 900;
 const verifiedDosuModels = new Set<string>();
@@ -171,8 +164,8 @@ export class ReplyService {
       model,
       instructions: [
         'You are preparing context for an API response.',
-        'Before any final answer is written, you must query the Dosu MCP server at least once.',
-        'Prefer search_documentation first. Use search_threads for discussion history when helpful. Use fetch_source to inspect any promising result in more detail.',
+        'Before any final answer is written, you must query the Dosu MCP server exactly once using search_threads.',
+        'Use search_threads to retrieve relevant discussion history and troubleshooting context.',
         'Do not call greet.',
         'Do not write a user-facing reply in this step.'
       ].join(' '),
@@ -180,14 +173,9 @@ export class ReplyService {
       stream: false,
       max_output_tokens: 300,
       tool_choice: {
-        type: 'allowed_tools',
-        mode: 'required',
-        tools: [
-          {
-            type: 'mcp',
-            server_label: 'dosu'
-          }
-        ]
+        type: 'mcp',
+        server_label: 'dosu',
+        name: DOSU_LOOKUP_TOOL
       },
       tools: [this.buildDosuMcpTool(DOSU_LOOKUP_TOOLS)]
     };
