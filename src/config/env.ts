@@ -1,26 +1,23 @@
-import dotenv from 'dotenv';
 import { z } from 'zod';
 
-dotenv.config();
-
 const DEFAULT_SYSTEM_PROMPT = [
-  'You are Spectre One, a Discord bot assistant.',
+  'You are Spectre One, an assistant behind an HTTP API.',
   'Reply in the user\'s language when it is clear; otherwise default to concise Simplified Chinese.',
   'Be direct, helpful, and brief.',
-  'Use the Dosu MCP server when the answer depends on team docs, internal architecture, runbooks, or product knowledge.',
+  'A Dosu MCP lookup runs before the final answer is written.',
+  'Use the retrieved Dosu context when the answer depends on team docs, internal architecture, runbooks, or product knowledge.',
   'If Dosu does not provide enough information, say so plainly instead of guessing.',
-  'Return only the message content that should be sent back to Discord.'
+  'Return only the final reply text.'
 ].join(' ');
 
 const envSchema = z.object({
-  DISCORD_BOT_TOKEN: z.string().min(1, 'DISCORD_BOT_TOKEN is required'),
-  DISCORD_ALLOWED_CHANNEL_IDS: z.string().optional().default(''),
-  DISCORD_REQUIRE_MENTION: z.string().optional(),
   OPENAI_API_KEY: z.string().min(1, 'OPENAI_API_KEY is required'),
-  OPENAI_MODEL: z.string().default('gpt-5-mini'),
+  OPENAI_MODEL: z.string().trim().optional(),
+  OPENAI_MODELS: z.string().trim().optional(),
   OPENAI_BASE_URL: z.string().url().optional(),
   OPENAI_REQUEST_TIMEOUT_MS: z.coerce.number().int().positive().default(45_000),
-  MAX_CONTEXT_MESSAGES: z.coerce.number().int().min(1).max(20).default(8),
+  MAX_CONTEXT_MESSAGES: z.coerce.number().int().min(1).max(50).default(8),
+  SYSTEM_PROMPT: z.string().trim().optional(),
   BOT_SYSTEM_PROMPT: z.string().optional(),
   DOSU_MCP_DEPLOYMENT_ID: z.string().uuid().optional(),
   DOSU_MCP_SERVER_URL: z.string().url().optional(),
@@ -28,24 +25,52 @@ const envSchema = z.object({
   DOSU_MCP_API_KEY: z.string().optional()
 });
 
+const discordEnvSchema = z.object({
+  DISCORD_APPLICATION_ID: z.string().regex(/^\d+$/, 'DISCORD_APPLICATION_ID must be a Discord snowflake.').optional(),
+  DISCORD_PUBLIC_KEY: z.string().regex(/^[0-9a-fA-F]{64}$/, 'DISCORD_PUBLIC_KEY must be a 64-character hex string.'),
+  DISCORD_BOT_TOKEN: z.string().min(1).optional(),
+  DISCORD_GUILD_ID: z.string().regex(/^\d+$/, 'DISCORD_GUILD_ID must be a Discord snowflake.').optional()
+});
+
+export interface WorkerBindings {
+  OPENAI_API_KEY?: string;
+  OPENAI_MODEL?: string;
+  OPENAI_MODELS?: string;
+  OPENAI_BASE_URL?: string;
+  OPENAI_REQUEST_TIMEOUT_MS?: string;
+  MAX_CONTEXT_MESSAGES?: string;
+  SYSTEM_PROMPT?: string;
+  BOT_SYSTEM_PROMPT?: string;
+  DOSU_MCP_DEPLOYMENT_ID?: string;
+  DOSU_MCP_SERVER_URL?: string;
+  DOSU_MCP_BASE_URL?: string;
+  DOSU_MCP_API_KEY?: string;
+  DISCORD_APPLICATION_ID?: string;
+  DISCORD_PUBLIC_KEY?: string;
+  DISCORD_BOT_TOKEN?: string;
+  DISCORD_GUILD_ID?: string;
+}
+
+export interface DiscordConfig {
+  applicationId?: string;
+  publicKey: string;
+  botToken?: string;
+  guildId?: string;
+}
+
 export interface AppConfig {
-  discord: {
-    token: string;
-    allowedChannelIds: string[];
-    requireMention: boolean;
-  };
   openai: {
     apiKey: string;
-    model: string;
+    models: string[];
     baseURL?: string;
     requestTimeoutMs: number;
   };
   dosu: {
     serverUrl: string;
     apiKey: string;
-    source: 'env';
+    source: 'server_url' | 'deployment_id';
   };
-  bot: {
+  app: {
     maxContextMessages: number;
     systemPrompt: string;
   };
@@ -54,22 +79,17 @@ export interface AppConfig {
 interface DosuConfig {
   serverUrl: string;
   apiKey: string;
-  source: 'env';
+  source: 'server_url' | 'deployment_id';
 }
 
-export function loadConfig(): AppConfig {
-  const parsed = envSchema.parse(process.env);
-  const allowedChannelIds = parseCsv(parsed.DISCORD_ALLOWED_CHANNEL_IDS);
+export function loadConfig(env: WorkerBindings): AppConfig {
+  const parsed = envSchema.parse(env);
+  const models = resolveModelList(parsed.OPENAI_MODELS, parsed.OPENAI_MODEL);
 
   return {
-    discord: {
-      token: parsed.DISCORD_BOT_TOKEN,
-      allowedChannelIds,
-      requireMention: resolveRequireMention(parsed.DISCORD_REQUIRE_MENTION, allowedChannelIds)
-    },
     openai: {
       apiKey: parsed.OPENAI_API_KEY,
-      model: parsed.OPENAI_MODEL,
+      models,
       baseURL: parsed.OPENAI_BASE_URL,
       requestTimeoutMs: parsed.OPENAI_REQUEST_TIMEOUT_MS
     },
@@ -79,35 +99,40 @@ export function loadConfig(): AppConfig {
       baseUrl: parsed.DOSU_MCP_BASE_URL,
       apiKey: parsed.DOSU_MCP_API_KEY
     }),
-    bot: {
+    app: {
       maxContextMessages: parsed.MAX_CONTEXT_MESSAGES,
-      systemPrompt: parsed.BOT_SYSTEM_PROMPT?.trim() || DEFAULT_SYSTEM_PROMPT
+      systemPrompt:
+        parsed.SYSTEM_PROMPT?.trim() ||
+        parsed.BOT_SYSTEM_PROMPT?.trim() ||
+        DEFAULT_SYSTEM_PROMPT
     }
   };
 }
 
-function parseCsv(value: string): string[] {
-  return value
-    .split(',')
-    .map((item) => item.trim())
-    .filter(Boolean);
+export function loadDiscordConfig(env: WorkerBindings): DiscordConfig {
+  const parsed = discordEnvSchema.parse(env);
+
+  return {
+    applicationId: parsed.DISCORD_APPLICATION_ID,
+    publicKey: parsed.DISCORD_PUBLIC_KEY,
+    botToken: parsed.DISCORD_BOT_TOKEN,
+    guildId: parsed.DISCORD_GUILD_ID
+  };
 }
 
-function resolveRequireMention(rawValue: string | undefined, allowedChannelIds: string[]): boolean {
-  if (rawValue === undefined || rawValue.trim() === '') {
-    return allowedChannelIds.length === 0;
+function resolveModelList(rawList?: string, rawSingle?: string): string[] {
+  const values = [rawSingle, rawList]
+    .filter(Boolean)
+    .flatMap((value) => value!.split(','))
+    .map((value) => value.trim())
+    .filter(Boolean);
+
+  const uniqueModels = [...new Set(values)];
+  if (uniqueModels.length > 0) {
+    return uniqueModels;
   }
 
-  const normalized = rawValue.trim().toLowerCase();
-  if (normalized === 'true') {
-    return true;
-  }
-
-  if (normalized === 'false') {
-    return false;
-  }
-
-  throw new Error('DISCORD_REQUIRE_MENTION must be "true" or "false" when provided.');
+  return ['gpt-5-mini'];
 }
 
 function resolveDosuConfig(input: {
@@ -120,7 +145,7 @@ function resolveDosuConfig(input: {
     return {
       serverUrl: input.serverUrl,
       apiKey: input.apiKey,
-      source: 'env'
+      source: 'server_url'
     };
   }
 
@@ -128,7 +153,7 @@ function resolveDosuConfig(input: {
     return {
       serverUrl: buildDeploymentEndpoint(input.baseUrl, input.deploymentId),
       apiKey: input.apiKey,
-      source: 'env'
+      source: 'deployment_id'
     };
   }
 

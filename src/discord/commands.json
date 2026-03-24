@@ -1,0 +1,48 @@
+{
+  "commands": [
+    {
+      "name": "ask",
+      "description": "Ask Spectre One with Dosu-backed context.",
+      "type": 1,
+      "options": [
+        {
+          "name": "prompt",
+          "description": "What you want to ask.",
+          "type": 3,
+          "required": true
+        },
+        {
+          "name": "model",
+          "description": "Optional model override, for example gpt-5.4.",
+          "type": 3,
+          "required": false
+        },
+        {
+          "name": "private",
+          "description": "If true, only you can see the response.",
+          "type": 5,
+          "required": false
+        }
+      ]
+    },
+    {
+      "name": "health",
+      "description": "Check the worker and optional upstream connectivity.",
+      "type": 1,
+      "options": [
+        {
+          "name": "check_upstream",
+          "description": "Verify OpenAI + Dosu connectivity.",
+          "type": 5,
+          "required": false
+        },
+        {
+          "name": "model",
+          "description": "Optional model override for the upstream check.",
+          "type": 3,
+          "required": false
+        }
+      ]
+    }
+  ]
+}

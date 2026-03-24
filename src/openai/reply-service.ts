@@ -23,6 +23,20 @@ const DOSU_REQUIRED_TOOLS = [
   'fetch_source'
 ] as const;
 
+const DEFAULT_MAX_OUTPUT_TOKENS = 900;
+const verifiedDosuModels = new Set<string>();
+
+export interface GenerateReplyOptions {
+  model?: string;
+  maxOutputTokens?: number;
+}
+
+export interface ReplyResult {
+  reply: string;
+  model: string;
+  attemptedModels: string[];
+}
+
 export class ReplyService {
   private readonly client: OpenAI;
   private readonly config: AppConfig;
@@ -35,34 +49,45 @@ export class ReplyService {
     });
   }
 
-  public async generateReply(input: string): Promise<string> {
-    const dosuLookupResponse = await this.createResponse(this.buildDosuLookupRequest(input));
-    const dosuCalls = getDosuMcpCalls(dosuLookupResponse);
+  public async generateReply(input: string, options: GenerateReplyOptions = {}): Promise<ReplyResult> {
+    const attemptedModels: string[] = [];
+    let lastError: unknown;
 
-    if (dosuCalls.length === 0) {
-      throw new Error('OpenAI did not query Dosu before generating a reply.');
+    for (const model of resolveModelSequence(options.model, this.config.openai.models)) {
+      attemptedModels.push(model);
+
+      try {
+        const reply = await this.generateReplyWithModel(model, input, options.maxOutputTokens ?? DEFAULT_MAX_OUTPUT_TOKENS);
+
+        return {
+          reply,
+          model,
+          attemptedModels: [...attemptedModels]
+        };
+      } catch (error) {
+        lastError = error;
+        logger.warn('openai_model_attempt_failed', {
+          model,
+          error
+        });
+      }
     }
 
-    logger.info('dosu_lookup_completed', {
-      callCount: dosuCalls.length,
-      tools: dosuCalls.map((call) => call.name),
-      statuses: dosuCalls.map((call) => call.status ?? 'completed'),
-      failedTools: dosuCalls.filter((call) => call.error).map((call) => call.name)
-    });
-
-    const response = await this.createResponse(this.buildReplyRequest(dosuLookupResponse.id));
-
-    const output = response.output_text.trim();
-    if (!output) {
-      throw new Error('OpenAI returned an empty response.');
-    }
-
-    return output;
+    throw (lastError instanceof Error ? lastError : new Error('No OpenAI model could generate a response.'));
   }
 
-  public async verifyDosuTools(): Promise<void> {
+  public async verifyDosuTools(modelOverride?: string): Promise<string> {
+    const model = resolveModelSequence(modelOverride, this.config.openai.models)[0];
+    if (!model) {
+      throw new Error('No OpenAI model is configured.');
+    }
+
+    if (verifiedDosuModels.has(model)) {
+      return model;
+    }
+
     const response = await this.createResponse({
-      model: this.config.openai.model,
+      model,
       input: 'Acknowledge with OK. Do not call any tool.',
       instructions: [
         'Initialize the configured MCP server so its tools are available.',
@@ -93,7 +118,10 @@ export class ReplyService {
       );
     }
 
+    verifiedDosuModels.add(model);
+
     logger.info('dosu_tools_loaded', {
+      model,
       serverLabel: mcpListTools.server_label,
       toolCount: importedTools.length,
       tools: importedTools
@@ -101,17 +129,48 @@ export class ReplyService {
 
     if (missingOptionalTools.length > 0) {
       logger.warn('dosu_optional_tools_missing', {
+        model,
         missingTools: missingOptionalTools,
         importedTools
       });
     }
+
+    return model;
   }
 
-  private buildDosuLookupRequest(input: string): ResponseCreateParamsNonStreaming {
+  private async generateReplyWithModel(model: string, input: string, maxOutputTokens: number): Promise<string> {
+    await this.verifyDosuTools(model);
+
+    const dosuLookupResponse = await this.createResponse(this.buildDosuLookupRequest(model, input));
+    const dosuCalls = getDosuMcpCalls(dosuLookupResponse);
+
+    if (dosuCalls.length === 0) {
+      throw new Error('OpenAI did not query Dosu before generating a reply.');
+    }
+
+    logger.info('dosu_lookup_completed', {
+      model,
+      callCount: dosuCalls.length,
+      tools: dosuCalls.map((call) => call.name),
+      statuses: dosuCalls.map((call) => call.status ?? 'completed'),
+      failedTools: dosuCalls.filter((call) => call.error).map((call) => call.name)
+    });
+
+    const response = await this.createResponse(this.buildReplyRequest(model, dosuLookupResponse.id, maxOutputTokens));
+
+    const output = response.output_text.trim();
+    if (!output) {
+      throw new Error('OpenAI returned an empty response.');
+    }
+
+    return output;
+  }
+
+  private buildDosuLookupRequest(model: string, input: string): ResponseCreateParamsNonStreaming {
     return {
-      model: this.config.openai.model,
+      model,
       instructions: [
-        'You are preparing context for a Discord bot reply.',
+        'You are preparing context for an API response.',
         'Before any final answer is written, you must query the Dosu MCP server at least once.',
         'Prefer search_documentation first. Use search_threads for discussion history when helpful. Use fetch_source to inspect any promising result in more detail.',
         'Do not call greet.',
@@ -134,19 +193,19 @@ export class ReplyService {
     };
   }
 
-  private buildReplyRequest(previousResponseId: string): ResponseCreateParamsNonStreaming {
+  private buildReplyRequest(model: string, previousResponseId: string, maxOutputTokens: number): ResponseCreateParamsNonStreaming {
     return {
-      model: this.config.openai.model,
+      model,
       instructions: [
-        this.config.bot.systemPrompt,
+        this.config.app.systemPrompt,
         'A Dosu lookup was already completed in the previous response.',
         'Use the retrieved Dosu context before answering the user.',
         'If the Dosu lookup failed or did not contain enough relevant information, say so plainly instead of guessing.'
       ].join(' '),
-      input: 'Write the final Discord reply for the original user request using the Dosu lookup above.',
+      input: 'Write the final reply for the original user request using the Dosu lookup above.',
       previous_response_id: previousResponseId,
       stream: false,
-      max_output_tokens: 900,
+      max_output_tokens: maxOutputTokens,
       tool_choice: 'none'
     };
   }
@@ -170,9 +229,16 @@ export class ReplyService {
   private async createResponse(request: ResponseCreateParamsNonStreaming): Promise<Response> {
     return withRetry(
       async () => {
-        return this.client.responses.create(request, {
-          signal: AbortSignal.timeout(this.config.openai.requestTimeoutMs)
-        });
+        const controller = new AbortController();
+        const timeoutId = setTimeout(() => controller.abort(), this.config.openai.requestTimeoutMs);
+
+        try {
+          return await this.client.responses.create(request, {
+            signal: controller.signal
+          });
+        } finally {
+          clearTimeout(timeoutId);
+        }
       },
       {
         retries: 2,
@@ -215,4 +281,12 @@ function isRetryableError(error: unknown): boolean {
   }
 
   return false;
+}
+
+function resolveModelSequence(requestedModel: string | undefined, configuredModels: readonly string[]): string[] {
+  return [requestedModel, ...configuredModels]
+    .filter((value): value is string => Boolean(value))
+    .map((value) => value.trim())
+    .filter(Boolean)
+    .filter((value, index, values) => values.indexOf(value) === index);
 }

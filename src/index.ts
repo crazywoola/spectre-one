@@ -1,45 +1,132 @@
-import { createDiscordBot } from './discord/bot.js';
-import { loadConfig } from './config/env.js';
+import { Hono } from 'hono';
+import { cors } from 'hono/cors';
+import { HTTPException } from 'hono/http-exception';
+import { ZodError } from 'zod';
+
+import discordCommands from './discord/commands.json';
+import { handleDiscordInteraction } from './discord/interactions.js';
+import { loadConfig, type WorkerBindings } from './config/env.js';
 import { ReplyService } from './openai/reply-service.js';
+import { buildPrompt, parseReplyRequest } from './reply/request.js';
 import { logger } from './shared/logger.js';
 
-const config = loadConfig();
-const replyService = new ReplyService(config);
+type AppEnv = {
+  Bindings: WorkerBindings;
+};
 
-process.on('unhandledRejection', (error) => {
-  logger.error('unhandled_rejection', {
-    error: error instanceof Error ? error : new Error(String(error))
+const app = new Hono<AppEnv>();
+
+app.use('*', cors());
+
+app.get('/', (c) => {
+  const config = loadConfig(c.env);
+
+  return c.json({
+    name: 'Spectre One',
+    runtime: 'cloudflare-workers',
+    endpoints: {
+      health: '/health',
+      interactions: '/interactions',
+      reply: '/v1/reply'
+    },
+    models: config.openai.models,
+    discordCommands: discordCommands.commands.map((command) => command.name)
   });
 });
 
-process.on('uncaughtException', (error) => {
-  logger.error('uncaught_exception', { error });
+app.get('/health', async (c) => {
+  const config = loadConfig(c.env);
+  const shouldVerifyUpstream = c.req.query('check') === 'upstream';
+
+  if (!shouldVerifyUpstream) {
+    return c.json({
+      ok: true,
+      runtime: 'cloudflare-workers',
+      models: config.openai.models,
+      dosuSource: config.dosu.source
+    });
+  }
+
+  const replyService = new ReplyService(config);
+  const verifiedModel = await replyService.verifyDosuTools();
+
+  return c.json({
+    ok: true,
+    runtime: 'cloudflare-workers',
+    models: config.openai.models,
+    dosuSource: config.dosu.source,
+    upstream: 'ok',
+    verifiedModel
+  });
 });
 
-for (const signal of ['SIGINT', 'SIGTERM'] as const) {
-  process.on(signal, () => {
-    logger.info('shutdown_signal', { signal });
-    client.destroy();
-    process.exit(0);
-  });
-}
+app.post('/interactions', async (c) => {
+  return handleDiscordInteraction(c.req.raw, c.env, c.executionCtx);
+});
 
-try {
-  await replyService.verifyDosuTools();
-} catch (error) {
-  logger.error('dosu_tool_verification_failed', {
-    error: error instanceof Error ? error : new Error(String(error))
+app.post('/v1/reply', async (c) => {
+  const config = loadConfig(c.env);
+  const payload = parseReplyRequest(await readJson(c.req.raw));
+  const prompt = buildPrompt(payload, config.app.maxContextMessages);
+  const replyService = new ReplyService(config);
+  const result = await replyService.generateReply(prompt, {
+    model: payload.model,
+    maxOutputTokens: payload.max_output_tokens
   });
-  process.exit(1);
-}
 
-const client = createDiscordBot(config, replyService);
-
-try {
-  await client.login(config.discord.token);
-} catch (error) {
-  logger.error('discord_login_failed', {
-    error: error instanceof Error ? error : new Error(String(error))
+  logger.info('reply_generated', {
+    model: result.model,
+    attemptedModels: result.attemptedModels,
+    promptLength: payload.prompt.length
   });
-  process.exit(1);
+
+  return c.json({
+    reply: result.reply,
+    model: result.model,
+    attemptedModels: result.attemptedModels
+  });
+});
+
+app.onError((error, c) => {
+  logger.error('request_failed', {
+    method: c.req.method,
+    path: c.req.path,
+    error
+  });
+
+  if (error instanceof HTTPException) {
+    return c.json({ error: error.message }, error.status);
+  }
+
+  if (error instanceof ZodError) {
+    return c.json(
+      {
+        error: 'Invalid request.',
+        issues: error.issues.map((issue) => ({
+          path: issue.path.join('.'),
+          message: issue.message
+        }))
+      },
+      400
+    );
+  }
+
+  return c.json(
+    {
+      error: error instanceof Error ? error.message : 'Internal Server Error'
+    },
+    500
+  );
+});
+
+export default app;
+
+async function readJson(request: Request): Promise<unknown> {
+  try {
+    return await request.json();
+  } catch {
+    throw new HTTPException(400, {
+      message: 'Request body must be valid JSON.'
+    });
+  }
 }
