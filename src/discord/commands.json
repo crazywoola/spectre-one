@@ -1,6 +1,10 @@
 {
   "commands": [
     {
+      "name": "Ask Spectre about this",
+      "type": 3
+    },
+    {
       "name": "ask",
       "description": "Ask Spectre One with Dosu-backed context.",
       "type": 1,
@@ -24,6 +28,11 @@
           "required": false
         }
       ]
+    },
+    {
+      "name": "incident",
+      "description": "Open an incident intake modal for version, deployment type, and failure details.",
+      "type": 1
     },
     {
       "name": "health",

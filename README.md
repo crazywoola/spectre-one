@@ -11,6 +11,7 @@ Replies are generated with the OpenAI `Responses API`. Before the final answer i
 
 - Built on `hono` and deployable to Cloudflare Workers
 - Discord slash-command support through Interactions webhooks
+- Discord message context menu support
 - Ed25519 signature verification for Discord requests
 - Deferred Discord responses with edit-original and follow-up messages
 - Multi-model OpenAI configuration with per-request override and fallback
@@ -160,7 +161,9 @@ npm run discord:register -- --guild 123456789012345678
 
 Registered commands come from [src/discord/commands.json](/Users/minibanana/Program/POC/spectre-one/src/discord/commands.json):
 
+- Message context menu: `Ask Spectre about this`
 - `/ask prompt:<text> model:<optional> private:<optional>`
+- `/incident`
 - `/health check_upstream:<optional> model:<optional>`
 
 ### 6. Configure the Interactions endpoint
@@ -198,6 +201,12 @@ After deployment:
 
 ## Discord Behavior
 
+- The message context menu `Ask Spectre about this` appears when you right-click a Discord message under `Apps`.
+- `/incident` opens a modal that collects:
+  - deployment type: `cloud` or `self-hosted`
+  - version number
+  - failure description
+- The `/incident` failure description must be at least 50 words. The worker validates this on modal submission.
 - `/ask` defers immediately, then the worker edits the original interaction response after OpenAI + Dosu complete.
 - Long replies are split into multiple Discord messages automatically.
 - `private:true` makes the response ephemeral.

@@ -10,17 +10,58 @@ import { splitDiscordMessage } from '../shared/messages.js';
 
 const GENERIC_FAILURE_MESSAGE = 'I ran into a problem while processing that request. Please try again in a moment.';
 const MESSAGE_FLAG_EPHEMERAL = 1 << 6;
+const ASK_MESSAGE_COMMAND_NAME = 'Ask Spectre about this';
+const INCIDENT_MODAL_CUSTOM_ID = 'incident_report_modal_v1';
+const INCIDENT_DEPLOYMENT_TYPE_FIELD_ID = 'incident_deployment_type';
+const INCIDENT_VERSION_FIELD_ID = 'incident_version';
+const INCIDENT_DESCRIPTION_FIELD_ID = 'incident_description';
 
 const InteractionType = {
   PING: 1,
-  APPLICATION_COMMAND: 2
+  APPLICATION_COMMAND: 2,
+  MODAL_SUBMIT: 5
+} as const;
+
+const ApplicationCommandType = {
+  CHAT_INPUT: 1,
+  USER: 2,
+  MESSAGE: 3
 } as const;
 
 const InteractionResponseType = {
   PONG: 1,
   CHANNEL_MESSAGE_WITH_SOURCE: 4,
-  DEFERRED_CHANNEL_MESSAGE_WITH_SOURCE: 5
+  DEFERRED_CHANNEL_MESSAGE_WITH_SOURCE: 5,
+  MODAL: 9
 } as const;
+
+const TextInputStyle = {
+  SHORT: 1,
+  PARAGRAPH: 2
+} as const;
+
+const userSchema = z.object({
+  id: z.string(),
+  username: z.string(),
+  global_name: z.string().nullable().optional()
+});
+
+const attachmentSchema = z
+  .object({
+    filename: z.string().optional(),
+    url: z.string().optional(),
+    content_type: z.string().optional()
+  })
+  .passthrough();
+
+const resolvedMessageSchema = z
+  .object({
+    id: z.string().optional(),
+    content: z.string().optional(),
+    author: userSchema.optional(),
+    attachments: z.union([z.array(attachmentSchema), z.record(z.string(), attachmentSchema)]).optional()
+  })
+  .passthrough();
 
 const interactionOptionSchema: z.ZodType<DiscordInteractionOption> = z.lazy(() =>
   z.object({
@@ -31,44 +72,56 @@ const interactionOptionSchema: z.ZodType<DiscordInteractionOption> = z.lazy(() =
   })
 );
 
-const interactionSchema = z.object({
-  id: z.string().optional(),
-  type: z.number(),
-  application_id: z.string().optional(),
-  token: z.string().optional(),
-  guild_id: z.string().optional(),
-  channel_id: z.string().optional(),
-  channel: z
+const interactionComponentSchema: z.ZodType<DiscordInteractionComponent> = z.lazy(() =>
+  z
     .object({
-      id: z.string().optional(),
-      name: z.string().optional()
+      type: z.number(),
+      custom_id: z.string().optional(),
+      value: z.string().optional(),
+      components: z.array(interactionComponentSchema).optional(),
+      component: interactionComponentSchema.optional()
     })
-    .optional(),
-  data: z
-    .object({
-      name: z.string(),
-      options: z.array(interactionOptionSchema).optional()
-    })
-    .optional(),
-  member: z
-    .object({
-      user: z
-        .object({
-          id: z.string(),
-          username: z.string(),
-          global_name: z.string().nullable().optional()
-        })
-        .optional()
-    })
-    .optional(),
-  user: z
-    .object({
-      id: z.string(),
-      username: z.string(),
-      global_name: z.string().nullable().optional()
-    })
-    .optional()
-}).passthrough();
+    .passthrough()
+);
+
+const interactionSchema = z
+  .object({
+    id: z.string().optional(),
+    type: z.number(),
+    application_id: z.string().optional(),
+    token: z.string().optional(),
+    guild_id: z.string().optional(),
+    channel_id: z.string().optional(),
+    channel: z
+      .object({
+        id: z.string().optional(),
+        name: z.string().optional()
+      })
+      .optional(),
+    data: z
+      .object({
+        name: z.string().optional(),
+        type: z.number().optional(),
+        options: z.array(interactionOptionSchema).optional(),
+        target_id: z.string().optional(),
+        custom_id: z.string().optional(),
+        components: z.array(interactionComponentSchema).optional(),
+        resolved: z
+          .object({
+            messages: z.record(z.string(), resolvedMessageSchema).optional()
+          })
+          .optional()
+      })
+      .passthrough()
+      .optional(),
+    member: z
+      .object({
+        user: userSchema.optional()
+      })
+      .optional(),
+    user: userSchema.optional()
+  })
+  .passthrough();
 
 type DiscordInteractionOption = {
   name: string;
@@ -77,7 +130,16 @@ type DiscordInteractionOption = {
   options?: DiscordInteractionOption[];
 };
 
+type DiscordInteractionComponent = {
+  type: number;
+  custom_id?: string;
+  value?: string;
+  components?: DiscordInteractionComponent[];
+  component?: DiscordInteractionComponent;
+};
+
 type DiscordInteraction = z.infer<typeof interactionSchema>;
+type ResolvedMessage = z.infer<typeof resolvedMessageSchema>;
 
 interface DiscordWebhookMessage {
   content: string;
@@ -107,22 +169,88 @@ export async function handleDiscordInteraction(
 
   const interaction = interactionSchema.parse(parseJson(rawBody));
 
-  if (interaction.type === InteractionType.PING) {
-    return json({ type: InteractionResponseType.PONG });
+  switch (interaction.type) {
+    case InteractionType.PING:
+      return json({ type: InteractionResponseType.PONG });
+    case InteractionType.APPLICATION_COMMAND:
+      return handleApplicationCommandInteraction(interaction, env, executionCtx);
+    case InteractionType.MODAL_SUBMIT:
+      return handleModalSubmitInteraction(interaction, env, executionCtx);
+    default:
+      return json(ephemeralMessage('Unsupported interaction type.'));
+  }
+}
+
+function handleApplicationCommandInteraction(
+  interaction: DiscordInteraction,
+  env: WorkerBindings,
+  executionCtx: ExecutionContext
+): Response {
+  const commandName = interaction.data?.name;
+  const commandType = interaction.data?.type;
+
+  if (commandType === ApplicationCommandType.MESSAGE || commandName === ASK_MESSAGE_COMMAND_NAME) {
+    return handleAskMessageCommandInteraction(interaction, env, executionCtx);
   }
 
-  if (interaction.type !== InteractionType.APPLICATION_COMMAND || !interaction.data?.name) {
-    return json(ephemeralMessage('Unsupported interaction type.'));
+  if (commandType !== ApplicationCommandType.CHAT_INPUT || !commandName) {
+    return json(ephemeralMessage('Unsupported application command.'));
   }
 
-  switch (interaction.data.name) {
+  switch (commandName) {
     case 'ask':
       return handleAskInteraction(interaction, env, executionCtx);
     case 'health':
       return handleHealthInteraction(interaction, env, executionCtx);
+    case 'incident':
+      return json(buildIncidentModalResponse());
     default:
-      return json(ephemeralMessage(`Unknown command: ${interaction.data.name}`));
+      return json(ephemeralMessage(`Unknown command: ${commandName}`));
   }
+}
+
+function handleModalSubmitInteraction(
+  interaction: DiscordInteraction,
+  env: WorkerBindings,
+  executionCtx: ExecutionContext
+): Response {
+  if (interaction.data?.custom_id !== INCIDENT_MODAL_CUSTOM_ID) {
+    return json(ephemeralMessage('Unsupported modal submission.'));
+  }
+
+  const modalValues = getModalTextValues(interaction);
+  const deploymentType = modalValues[INCIDENT_DEPLOYMENT_TYPE_FIELD_ID]?.trim();
+  const version = modalValues[INCIDENT_VERSION_FIELD_ID]?.trim();
+  const description = modalValues[INCIDENT_DESCRIPTION_FIELD_ID]?.trim();
+
+  if (!deploymentType || !version || !description) {
+    return json(ephemeralMessage('All incident fields are required.'));
+  }
+
+  const descriptionWordCount = countWords(description);
+  if (descriptionWordCount < 50) {
+    return json(
+      ephemeralMessage(
+        `The incident description must be at least 50 words. You provided ${descriptionWordCount} word(s). Please run \`/incident\` again and add more detail.`
+      )
+    );
+  }
+
+  executionCtx.waitUntil(
+    processReplyInteraction({
+      interaction,
+      env,
+      prompt: buildIncidentPrompt({
+        deploymentType,
+        version,
+        description
+      }),
+      isPrivate: true,
+      commandName: 'incident'
+    })
+  );
+
+  return json(deferredMessage(true));
 }
 
 function handleAskInteraction(
@@ -139,16 +267,49 @@ function handleAskInteraction(
   const isPrivate = getBooleanOption(interaction, 'private') ?? true;
 
   executionCtx.waitUntil(
-    processAskInteraction({
+    processReplyInteraction({
       interaction,
       env,
       prompt,
       requestedModel,
-      isPrivate
+      isPrivate,
+      commandName: 'ask'
     })
   );
 
   return json(deferredMessage(isPrivate));
+}
+
+function handleAskMessageCommandInteraction(
+  interaction: DiscordInteraction,
+  env: WorkerBindings,
+  executionCtx: ExecutionContext
+): Response {
+  const targetMessage = getTargetMessage(interaction);
+  if (!targetMessage) {
+    return json(ephemeralMessage('Discord did not include the selected message in the interaction payload.'));
+  }
+
+  const selectedMessage = renderTargetMessage(targetMessage);
+  if (!selectedMessage.trim()) {
+    return json(
+      ephemeralMessage(
+        'The selected message did not include readable content. If this keeps happening, check the app permissions and try again.'
+      )
+    );
+  }
+
+  executionCtx.waitUntil(
+    processReplyInteraction({
+      interaction,
+      env,
+      prompt: buildMessageContextPrompt(selectedMessage),
+      isPrivate: true,
+      commandName: ASK_MESSAGE_COMMAND_NAME
+    })
+  );
+
+  return json(deferredMessage(true));
 }
 
 function handleHealthInteraction(
@@ -183,63 +344,31 @@ function handleHealthInteraction(
   return json(deferredMessage(true));
 }
 
-async function processAskInteraction(input: {
+async function processReplyInteraction(input: {
   interaction: DiscordInteraction;
   env: WorkerBindings;
   prompt: string;
   requestedModel?: string;
   isPrivate: boolean;
+  commandName: string;
 }): Promise<void> {
-  const { interaction, env, prompt, requestedModel, isPrivate } = input;
+  const { interaction, env, prompt, requestedModel, isPrivate, commandName } = input;
 
   try {
     const config = loadConfig(env);
     const replyService = new ReplyService(config);
     const result = await replyService.generateReply(
-      buildPrompt(
-        {
-          prompt,
-          conversation: [],
-          metadata: {
-            source: 'discord',
-            workspace: interaction.guild_id ? `guild:${interaction.guild_id}` : 'discord-dm',
-            channel: interaction.channel?.name ?? interaction.channel_id ?? 'unknown-channel',
-            user: getInteractionUserName(interaction)
-          }
-        },
-        config.app.maxContextMessages
-      ),
+      buildDiscordPromptForInteraction(interaction, prompt, config.app.maxContextMessages),
       {
         model: requestedModel
       }
     );
 
-    const chunks = splitDiscordMessage(result.reply);
-    if (chunks.length === 0) {
-      throw new Error('The generated Discord reply was empty after chunking.');
-    }
-
-    const [firstChunk, ...restChunks] = chunks;
-    if (!firstChunk) {
-      throw new Error('The generated Discord reply did not contain a first chunk.');
-    }
-
-    await editOriginalInteractionResponse(interaction, {
-      content: firstChunk,
-      allowed_mentions: { parse: [] }
-    });
-
-    for (const chunk of restChunks) {
-      await createFollowupInteractionResponse(interaction, {
-        content: chunk,
-        allowed_mentions: { parse: [] },
-        flags: isPrivate ? MESSAGE_FLAG_EPHEMERAL : undefined
-      });
-    }
+    await deliverDiscordTextResponse(interaction, result.reply, isPrivate);
 
     logger.info('discord_interaction_replied', {
       interactionId: interaction.id,
-      command: interaction.data?.name,
+      command: commandName,
       model: result.model,
       attemptedModels: result.attemptedModels,
       private: isPrivate
@@ -247,7 +376,7 @@ async function processAskInteraction(input: {
   } catch (error) {
     logger.error('discord_interaction_reply_failed', {
       interactionId: interaction.id,
-      command: interaction.data?.name,
+      command: commandName,
       error
     });
 
@@ -293,6 +422,239 @@ async function processUpstreamHealthCheck(input: {
       allowed_mentions: { parse: [] }
     });
   }
+}
+
+async function deliverDiscordTextResponse(
+  interaction: DiscordInteraction,
+  content: string,
+  isPrivate: boolean
+): Promise<void> {
+  const chunks = splitDiscordMessage(content);
+  if (chunks.length === 0) {
+    throw new Error('The generated Discord reply was empty after chunking.');
+  }
+
+  const [firstChunk, ...restChunks] = chunks;
+  if (!firstChunk) {
+    throw new Error('The generated Discord reply did not contain a first chunk.');
+  }
+
+  await editOriginalInteractionResponse(interaction, {
+    content: firstChunk,
+    allowed_mentions: { parse: [] }
+  });
+
+  for (const chunk of restChunks) {
+    await createFollowupInteractionResponse(interaction, {
+      content: chunk,
+      allowed_mentions: { parse: [] },
+      flags: isPrivate ? MESSAGE_FLAG_EPHEMERAL : undefined
+    });
+  }
+}
+
+function buildDiscordPromptForInteraction(
+  interaction: DiscordInteraction,
+  prompt: string,
+  maxContextMessages: number
+): string {
+  return buildPrompt(
+    {
+      prompt,
+      conversation: [],
+      metadata: {
+        source: 'discord',
+        workspace: interaction.guild_id ? `guild:${interaction.guild_id}` : 'discord-dm',
+        channel: interaction.channel?.name ?? interaction.channel_id ?? 'unknown-channel',
+        user: getInteractionUserName(interaction)
+      }
+    },
+    maxContextMessages
+  );
+}
+
+function buildMessageContextPrompt(selectedMessage: string): string {
+  return [
+    `The user invoked the Discord message command "${ASK_MESSAGE_COMMAND_NAME}" on a selected message.`,
+    'Analyze the selected message and help the user with it.',
+    'If it asks a question, answer it directly.',
+    'If it describes a problem, explain likely causes and suggest the most useful next steps.',
+    'If the message is ambiguous, say what information is still missing.',
+    '',
+    'Selected message:',
+    selectedMessage
+  ].join('\n');
+}
+
+function buildIncidentPrompt(input: {
+  deploymentType: string;
+  version: string;
+  description: string;
+}): string {
+  return [
+    'The user submitted an incident report through the `/incident` modal.',
+    `Deployment type: ${input.deploymentType}`,
+    `Version: ${input.version}`,
+    '',
+    'Incident description:',
+    input.description,
+    '',
+    'Provide a concise but practical triage response with:',
+    '1. A short summary of the incident.',
+    '2. The most likely causes.',
+    '3. Immediate checks to run next.',
+    '4. Recommended mitigation or rollback steps.',
+    '5. Any missing information needed to continue troubleshooting.'
+  ].join('\n');
+}
+
+function buildIncidentModalResponse(): {
+  type: number;
+  data: {
+    custom_id: string;
+    title: string;
+    components: Array<{
+      type: number;
+      components: Array<{
+        type: number;
+        custom_id: string;
+        label: string;
+        style: number;
+        min_length?: number;
+        max_length?: number;
+        placeholder?: string;
+        required: boolean;
+      }>;
+    }>;
+  };
+} {
+  return {
+    type: InteractionResponseType.MODAL,
+    data: {
+      custom_id: INCIDENT_MODAL_CUSTOM_ID,
+      title: 'Report an Incident',
+      components: [
+        {
+          type: 1,
+          components: [
+            {
+              type: 4,
+              custom_id: INCIDENT_DEPLOYMENT_TYPE_FIELD_ID,
+              label: 'Deployment Type',
+              style: TextInputStyle.SHORT,
+              min_length: 5,
+              max_length: 32,
+              placeholder: 'cloud or self-hosted',
+              required: true
+            }
+          ]
+        },
+        {
+          type: 1,
+          components: [
+            {
+              type: 4,
+              custom_id: INCIDENT_VERSION_FIELD_ID,
+              label: 'Version',
+              style: TextInputStyle.SHORT,
+              min_length: 2,
+              max_length: 128,
+              placeholder: 'For example 1.2.3 or a cloud build identifier',
+              required: true
+            }
+          ]
+        },
+        {
+          type: 1,
+          components: [
+            {
+              type: 4,
+              custom_id: INCIDENT_DESCRIPTION_FIELD_ID,
+              label: 'Failure Description (50+ words)',
+              style: TextInputStyle.PARAGRAPH,
+              min_length: 50,
+              max_length: 4000,
+              placeholder: 'Describe the symptoms, affected scope, recent changes, and what you have already checked.',
+              required: true
+            }
+          ]
+        }
+      ]
+    }
+  };
+}
+
+function getTargetMessage(interaction: DiscordInteraction): ResolvedMessage | null {
+  const targetId = interaction.data?.target_id;
+  if (!targetId) {
+    return null;
+  }
+
+  return interaction.data?.resolved?.messages?.[targetId] ?? null;
+}
+
+function renderTargetMessage(message: ResolvedMessage): string {
+  const authorName = message.author?.global_name ?? message.author?.username ?? 'unknown-user';
+  const attachmentLines = getAttachmentLines(message.attachments);
+  const sections = [`Author: ${authorName}`];
+
+  if (message.content?.trim()) {
+    sections.push('Content:', message.content.trim());
+  }
+
+  if (attachmentLines.length > 0) {
+    sections.push('Attachments:', attachmentLines.join('\n'));
+  }
+
+  return sections.join('\n');
+}
+
+function getAttachmentLines(
+  attachments: ResolvedMessage['attachments']
+): string[] {
+  if (!attachments) {
+    return [];
+  }
+
+  const list = Array.isArray(attachments) ? attachments : Object.values(attachments);
+
+  return list.map((attachment) => {
+    const kind = attachment.content_type ? ` (${attachment.content_type})` : '';
+    return `- ${attachment.filename ?? 'attachment'}${kind}${attachment.url ? `: ${attachment.url}` : ''}`;
+  });
+}
+
+function getModalTextValues(interaction: DiscordInteraction): Record<string, string> {
+  const values: Record<string, string> = {};
+  const components = interaction.data?.components ?? [];
+  collectModalTextValues(components, values);
+  return values;
+}
+
+function collectModalTextValues(
+  components: DiscordInteractionComponent[],
+  values: Record<string, string>
+): void {
+  for (const component of components) {
+    if (component.custom_id && typeof component.value === 'string') {
+      values[component.custom_id] = component.value;
+    }
+
+    if (component.component) {
+      collectModalTextValues([component.component], values);
+    }
+
+    if (component.components) {
+      collectModalTextValues(component.components, values);
+    }
+  }
+}
+
+function countWords(value: string): number {
+  return value
+    .trim()
+    .split(/\s+/)
+    .filter(Boolean).length;
 }
 
 function verifyDiscordRequest(signatureHex: string, timestamp: string, rawBody: string, publicKeyHex: string): boolean {
