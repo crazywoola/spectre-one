@@ -5,7 +5,7 @@ import type { AppConfig } from '../config/env.js';
 import { logger } from '../shared/logger.js';
 import { withRetry } from '../shared/retry.js';
 
-const DOSU_LOOKUP_TOOL = 'search_threads' as const;
+const DOSU_LOOKUP_TOOL = 'ask' as const;
 
 const DOSU_LOOKUP_TOOLS = [DOSU_LOOKUP_TOOL] as const;
 
@@ -164,8 +164,8 @@ export class ReplyService {
       model,
       instructions: [
         'You are preparing context for an API response.',
-        'Before any final answer is written, you must query the Dosu MCP server exactly once using search_threads.',
-        'Use search_threads to retrieve relevant discussion history and troubleshooting context.',
+        'Before any final answer is written, you must query the Dosu MCP server exactly once using ask.',
+        'Use ask to retrieve the most relevant internal troubleshooting context before the final response is written.',
         'Do not call greet.',
         'Do not write a user-facing reply in this step.'
       ].join(' '),
