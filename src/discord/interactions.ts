@@ -3,6 +3,11 @@ import { z } from 'zod';
 
 import type { WorkerBindings } from '../config/env.js';
 import { loadConfig, loadDiscordConfig } from '../config/env.js';
+import {
+  insertIncidentReport,
+  markIncidentReportCompleted,
+  markIncidentReportFailed
+} from '../incidents/store.js';
 import { ReplyService } from '../openai/reply-service.js';
 import { buildPrompt } from '../reply/request.js';
 import { logger } from '../shared/logger.js';
@@ -13,6 +18,8 @@ const MESSAGE_FLAG_EPHEMERAL = 1 << 6;
 const ASK_MESSAGE_COMMAND_NAME = 'Ask Spectre about this';
 const INCIDENT_MODAL_CUSTOM_ID = 'incident_report_modal_v1';
 const INCIDENT_DEPLOYMENT_TYPE_FIELD_ID = 'incident_deployment_type';
+const INCIDENT_CLOUD_PLAN_FIELD_ID = 'incident_cloud_plan';
+const INCIDENT_ACCOUNT_EMAIL_FIELD_ID = 'incident_account_email';
 const INCIDENT_VERSION_FIELD_ID = 'incident_version';
 const INCIDENT_DESCRIPTION_FIELD_ID = 'incident_description';
 
@@ -33,6 +40,12 @@ const InteractionResponseType = {
   CHANNEL_MESSAGE_WITH_SOURCE: 4,
   DEFERRED_CHANNEL_MESSAGE_WITH_SOURCE: 5,
   MODAL: 9
+} as const;
+
+const ComponentType = {
+  TEXT_INPUT: 4,
+  LABEL: 18,
+  RADIO_GROUP: 21
 } as const;
 
 const TextInputStyle = {
@@ -149,6 +162,34 @@ interface DiscordWebhookMessage {
   };
 }
 
+interface IncidentModalLabelComponent {
+  type: number;
+  label: string;
+  description?: string;
+  component: IncidentModalFieldComponent;
+}
+
+type IncidentModalFieldComponent =
+  | {
+      type: number;
+      custom_id: string;
+      style: number;
+      min_length?: number;
+      max_length?: number;
+      placeholder?: string;
+      required: boolean;
+    }
+  | {
+      type: number;
+      custom_id: string;
+      options: Array<{
+        label: string;
+        value: string;
+        description?: string;
+      }>;
+      required?: boolean;
+    };
+
 export async function handleDiscordInteraction(
   request: Request,
   env: WorkerBindings,
@@ -219,12 +260,22 @@ function handleModalSubmitInteraction(
   }
 
   const modalValues = getModalTextValues(interaction);
-  const deploymentType = modalValues[INCIDENT_DEPLOYMENT_TYPE_FIELD_ID]?.trim();
+  const deploymentType = normalizeDeploymentType(modalValues[INCIDENT_DEPLOYMENT_TYPE_FIELD_ID]);
+  const cloudPlan = normalizeCloudPlan(modalValues[INCIDENT_CLOUD_PLAN_FIELD_ID]);
+  const accountEmail = modalValues[INCIDENT_ACCOUNT_EMAIL_FIELD_ID]?.trim().toLowerCase();
   const version = modalValues[INCIDENT_VERSION_FIELD_ID]?.trim();
   const description = modalValues[INCIDENT_DESCRIPTION_FIELD_ID]?.trim();
 
-  if (!deploymentType || !version || !description) {
+  if (!deploymentType || !accountEmail || !version || !description) {
     return json(ephemeralMessage('All incident fields are required.'));
+  }
+
+  if (!isValidEmail(accountEmail)) {
+    return json(ephemeralMessage('Please provide a valid account email address.'));
+  }
+
+  if (deploymentType === 'cloud' && !cloudPlan) {
+    return json(ephemeralMessage('Cloud incidents must include the subscription plan: TEAM, PRO, or FREE.'));
   }
 
   const descriptionWordCount = countWords(description);
@@ -237,16 +288,17 @@ function handleModalSubmitInteraction(
   }
 
   executionCtx.waitUntil(
-    processReplyInteraction({
+    processIncidentInteraction({
       interaction,
       env,
-      prompt: buildIncidentPrompt({
+      incident: {
         deploymentType,
+        cloudPlan,
+        accountEmail,
         version,
-        description
-      }),
-      isPrivate: true,
-      commandName: 'incident'
+        description,
+        descriptionWordCount
+      }
     })
   );
 
@@ -387,6 +439,91 @@ async function processReplyInteraction(input: {
   }
 }
 
+async function processIncidentInteraction(input: {
+  interaction: DiscordInteraction;
+  env: WorkerBindings;
+  incident: {
+    deploymentType: 'cloud' | 'self-hosted';
+    cloudPlan?: 'TEAM' | 'PRO' | 'FREE';
+    accountEmail: string;
+    version: string;
+    description: string;
+    descriptionWordCount: number;
+  };
+}): Promise<void> {
+  const { interaction, env, incident } = input;
+
+  let reportId: string | undefined;
+
+  try {
+    reportId = await insertIncidentReport(env, {
+      interactionId: interaction.id ?? crypto.randomUUID(),
+      guildId: interaction.guild_id,
+      channelId: interaction.channel_id,
+      userId: interaction.member?.user?.id ?? interaction.user?.id,
+      userName: getInteractionUserName(interaction),
+      deploymentType: incident.deploymentType,
+      cloudPlan: incident.deploymentType === 'cloud' ? incident.cloudPlan : undefined,
+      accountEmail: incident.accountEmail,
+      version: incident.version,
+      description: incident.description,
+      descriptionWordCount: incident.descriptionWordCount
+    });
+
+    const config = loadConfig(env);
+    const replyService = new ReplyService(config);
+    const result = await replyService.generateReply(
+      buildDiscordPromptForInteraction(
+        interaction,
+        buildIncidentPrompt({
+          deploymentType: incident.deploymentType,
+          cloudPlan: incident.deploymentType === 'cloud' ? incident.cloudPlan : undefined,
+          accountEmail: incident.accountEmail,
+          version: incident.version,
+          description: incident.description
+        }),
+        config.app.maxContextMessages
+      )
+    );
+
+    await markIncidentReportCompleted(env, reportId, result.model, result.reply);
+    await deliverDiscordTextResponse(interaction, result.reply, true);
+
+    logger.info('discord_incident_report_saved', {
+      interactionId: interaction.id,
+      reportId,
+      deploymentType: incident.deploymentType,
+      cloudPlan: incident.cloudPlan ?? null
+    });
+  } catch (error) {
+    logger.error('discord_incident_report_failed', {
+      interactionId: interaction.id,
+      reportId,
+      error
+    });
+
+    if (reportId) {
+      try {
+        await markIncidentReportFailed(
+          env,
+          reportId,
+          error instanceof Error ? error.message : 'Unknown incident processing failure.'
+        );
+      } catch (updateError) {
+        logger.warn('incident_report_status_update_failed', {
+          reportId,
+          error: updateError
+        });
+      }
+    }
+
+    await safeEditOriginalInteractionResponse(interaction, {
+      content: GENERIC_FAILURE_MESSAGE,
+      allowed_mentions: { parse: [] }
+    });
+  }
+}
+
 async function processUpstreamHealthCheck(input: {
   interaction: DiscordInteraction;
   env: WorkerBindings;
@@ -488,12 +625,16 @@ function buildMessageContextPrompt(selectedMessage: string): string {
 
 function buildIncidentPrompt(input: {
   deploymentType: string;
+  cloudPlan?: string;
+  accountEmail: string;
   version: string;
   description: string;
 }): string {
   return [
     'The user submitted an incident report through the `/incident` modal.',
     `Deployment type: ${input.deploymentType}`,
+    `Cloud plan: ${input.cloudPlan ?? 'not applicable'}`,
+    `Account email: ${input.accountEmail}`,
     `Version: ${input.version}`,
     '',
     'Incident description:',
@@ -513,19 +654,7 @@ function buildIncidentModalResponse(): {
   data: {
     custom_id: string;
     title: string;
-    components: Array<{
-      type: number;
-      components: Array<{
-        type: number;
-        custom_id: string;
-        label: string;
-        style: number;
-        min_length?: number;
-        max_length?: number;
-        placeholder?: string;
-        required: boolean;
-      }>;
-    }>;
+    components: IncidentModalLabelComponent[];
   };
 } {
   return {
@@ -535,49 +664,95 @@ function buildIncidentModalResponse(): {
       title: 'Report an Incident',
       components: [
         {
-          type: 1,
-          components: [
-            {
-              type: 4,
-              custom_id: INCIDENT_DEPLOYMENT_TYPE_FIELD_ID,
-              label: 'Deployment Type',
-              style: TextInputStyle.SHORT,
-              min_length: 5,
-              max_length: 32,
-              placeholder: 'cloud or self-hosted',
-              required: true
-            }
-          ]
+          type: ComponentType.LABEL,
+          label: 'Deployment Type',
+          description: 'Choose exactly one: Cloud or Self Hosted.',
+          component: {
+            type: ComponentType.RADIO_GROUP,
+            custom_id: INCIDENT_DEPLOYMENT_TYPE_FIELD_ID,
+            options: [
+              {
+                label: 'Cloud',
+                value: 'cloud',
+                description: 'The managed cloud service.'
+              },
+              {
+                label: 'Self Hosted',
+                value: 'self-hosted',
+                description: 'A self-managed deployment.'
+              }
+            ],
+            required: true
+          }
         },
         {
-          type: 1,
-          components: [
-            {
-              type: 4,
-              custom_id: INCIDENT_VERSION_FIELD_ID,
-              label: 'Version',
-              style: TextInputStyle.SHORT,
-              min_length: 2,
-              max_length: 128,
-              placeholder: 'For example 1.2.3 or a cloud build identifier',
-              required: true
-            }
-          ]
+          type: ComponentType.LABEL,
+          label: 'Cloud Plan',
+          description: 'Only select this if the deployment type is Cloud.',
+          component: {
+            type: ComponentType.RADIO_GROUP,
+            custom_id: INCIDENT_CLOUD_PLAN_FIELD_ID,
+            options: [
+              {
+                label: 'TEAM',
+                value: 'TEAM',
+                description: 'Paid team plan.'
+              },
+              {
+                label: 'PRO',
+                value: 'PRO',
+                description: 'Single-user paid plan.'
+              },
+              {
+                label: 'FREE',
+                value: 'FREE',
+                description: 'Free plan.'
+              }
+            ],
+            required: false
+          }
         },
         {
-          type: 1,
-          components: [
-            {
-              type: 4,
-              custom_id: INCIDENT_DESCRIPTION_FIELD_ID,
-              label: 'Failure Description (50+ words)',
-              style: TextInputStyle.PARAGRAPH,
-              min_length: 50,
-              max_length: 4000,
-              placeholder: 'Describe the symptoms, affected scope, recent changes, and what you have already checked.',
-              required: true
-            }
-          ]
+          type: ComponentType.LABEL,
+          label: 'Account Email',
+          description: 'Use the affected account email so support can correlate the report.',
+          component: {
+            type: ComponentType.TEXT_INPUT,
+            custom_id: INCIDENT_ACCOUNT_EMAIL_FIELD_ID,
+            style: TextInputStyle.SHORT,
+            min_length: 5,
+            max_length: 320,
+            placeholder: 'name@example.com',
+            required: true
+          }
+        },
+        {
+          type: ComponentType.LABEL,
+          label: 'Version',
+          description: 'Use the exact cloud build identifier or self-hosted version.',
+          component: {
+            type: ComponentType.TEXT_INPUT,
+            custom_id: INCIDENT_VERSION_FIELD_ID,
+            style: TextInputStyle.SHORT,
+            min_length: 2,
+            max_length: 128,
+            placeholder: 'For example 1.2.3 or a cloud build identifier',
+            required: true
+          }
+        },
+        {
+          type: ComponentType.LABEL,
+          label: 'Failure Description (50+ words)',
+          description: 'Describe symptoms, scope, recent changes, and what you already checked.',
+          component: {
+            type: ComponentType.TEXT_INPUT,
+            custom_id: INCIDENT_DESCRIPTION_FIELD_ID,
+            style: TextInputStyle.PARAGRAPH,
+            min_length: 50,
+            max_length: 4000,
+            placeholder: 'Describe the symptoms, affected scope, recent changes, and what you have already checked.',
+            required: true
+          }
         }
       ]
     }
@@ -655,6 +830,26 @@ function countWords(value: string): number {
     .trim()
     .split(/\s+/)
     .filter(Boolean).length;
+}
+
+function normalizeDeploymentType(value: string | undefined): 'cloud' | 'self-hosted' | undefined {
+  if (value === 'cloud' || value === 'self-hosted') {
+    return value;
+  }
+
+  return undefined;
+}
+
+function normalizeCloudPlan(value: string | undefined): 'TEAM' | 'PRO' | 'FREE' | undefined {
+  if (value === 'TEAM' || value === 'PRO' || value === 'FREE') {
+    return value;
+  }
+
+  return undefined;
+}
+
+function isValidEmail(value: string): boolean {
+  return /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(value);
 }
 
 function verifyDiscordRequest(signatureHex: string, timestamp: string, rawBody: string, publicKeyHex: string): boolean {

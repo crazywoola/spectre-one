@@ -8,6 +8,7 @@
     "dev": "wrangler dev",
     "build": "npm run check",
     "deploy": "wrangler deploy",
+    "db:migrate": "wrangler d1 migrations apply INCIDENTS_DB --remote",
     "check": "tsc --noEmit",
     "discord:register": "node scripts/register-discord-commands.mjs"
   },

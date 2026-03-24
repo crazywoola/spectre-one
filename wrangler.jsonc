@@ -2,5 +2,14 @@
   "$schema": "node_modules/wrangler/config-schema.json",
   "name": "spectre-one",
   "main": "src/index.ts",
-  "compatibility_date": "2026-03-24"
+  "compatibility_date": "2026-03-24",
+  "d1_databases": [
+    {
+      "binding": "INCIDENTS_DB",
+      "database_name": "spectre-one-db",
+      "database_id": "9f4d4d11-6071-4f68-9c99-0990c283fc7c",
+      "preview_database_id": "9f4d4d11-6071-4f68-9c99-0990c283fc7c",
+      "migrations_dir": "migrations"
+    }
+  ]
 }

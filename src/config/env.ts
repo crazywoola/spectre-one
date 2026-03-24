@@ -33,6 +33,7 @@ const discordEnvSchema = z.object({
 });
 
 export interface WorkerBindings {
+  INCIDENTS_DB?: D1Database;
   OPENAI_API_KEY?: string;
   OPENAI_MODEL?: string;
   OPENAI_MODELS?: string;

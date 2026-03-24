@@ -31,7 +31,7 @@
     },
     {
       "name": "incident",
-      "description": "Open an incident intake modal for version, deployment type, and failure details.",
+      "description": "Open an incident intake modal for deployment type, cloud plan, email, version, and failure details.",
       "type": 1
     },
     {

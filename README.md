@@ -14,6 +14,7 @@ Replies are generated with the OpenAI `Responses API`. Before the final answer i
 - Discord message context menu support
 - Ed25519 signature verification for Discord requests
 - Deferred Discord responses with edit-original and follow-up messages
+- Incident intake persisted in Cloudflare D1
 - Multi-model OpenAI configuration with per-request override and fallback
 - Dosu MCP integration with required pre-answer lookup
 
@@ -187,7 +188,18 @@ https://your-tunnel-domain.example.com/interactions
 Discord will validate the endpoint by sending a `PING`.
 This worker responds to `PING` and verifies the request signature using `DISCORD_PUBLIC_KEY`.
 
-### 7. Deploy to Cloudflare Workers
+### 7. Apply the D1 migration
+
+The incident intake flow stores reports in the `incident_reports` table in Cloudflare D1.
+This repository already includes the migration file in [migrations/0001_create_incident_reports.sql](/Users/minibanana/Program/POC/spectre-one/migrations/0001_create_incident_reports.sql) and the Worker binding in [wrangler.jsonc](/Users/minibanana/Program/POC/spectre-one/wrangler.jsonc).
+
+Apply it before the first production deploy:
+
+```bash
+npm run db:migrate
+```
+
+### 8. Deploy to Cloudflare Workers
 
 ```bash
 npm run deploy
@@ -203,10 +215,13 @@ After deployment:
 
 - The message context menu `Ask Spectre about this` appears when you right-click a Discord message under `Apps`.
 - `/incident` opens a modal that collects:
-  - deployment type: `cloud` or `self-hosted`
+  - deployment type as a single choice: `cloud` or `self-hosted`
+  - cloud subscription plan for cloud incidents: `TEAM`, `PRO`, or `FREE`
+  - account email
   - version number
   - failure description
 - The `/incident` failure description must be at least 50 words. The worker validates this on modal submission.
+- Successful and failed `/incident` submissions are stored in Cloudflare D1 with the original intake fields plus response status and reply metadata.
 - `/ask` defers immediately, then the worker edits the original interaction response after OpenAI + Dosu complete.
 - Long replies are split into multiple Discord messages automatically.
 - `private:true` makes the response ephemeral.
