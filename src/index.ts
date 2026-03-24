@@ -35,29 +35,26 @@ app.get('/', (c) => {
 });
 
 app.get('/health', async (c) => {
-  const config = loadConfig(c.env);
   const shouldVerifyUpstream = c.req.query('check') === 'upstream';
 
   if (!shouldVerifyUpstream) {
-    return c.json({
-      ok: true,
-      runtime: 'cloudflare-workers',
-      models: config.openai.models,
-      dosuSource: config.dosu.source
-    });
+    return c.json({ ok: true });
   }
 
-  const replyService = new ReplyService(config);
-  const verifiedModel = await replyService.verifyDosuTools();
+  try {
+    const config = loadConfig(c.env);
+    const replyService = new ReplyService(config);
+    await replyService.verifyDosuTools();
 
-  return c.json({
-    ok: true,
-    runtime: 'cloudflare-workers',
-    models: config.openai.models,
-    dosuSource: config.dosu.source,
-    upstream: 'ok',
-    verifiedModel
-  });
+    return c.json({ ok: true });
+  } catch (error) {
+    logger.warn('health_upstream_check_failed', {
+      path: c.req.path,
+      error
+    });
+
+    return c.json({ ok: false }, 503);
+  }
 });
 
 app.post('/interactions', async (c) => {

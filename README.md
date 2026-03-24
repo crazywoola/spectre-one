@@ -37,7 +37,7 @@ cp .dev.vars.example .dev.vars
 
 ### 1. Fill `.dev.vars`
 
-Start from [.dev.vars.example](/Users/minibanana/Program/POC/spectre-one/.dev.vars.example) and fill these values:
+Start from [.dev.vars.example](.dev.vars.example) and fill these values:
 
 ```env
 OPENAI_API_KEY=sk-...
@@ -88,11 +88,11 @@ How to fill each one:
    If you fill it, `npm run discord:register` registers guild commands for that server and changes appear quickly.
    If you leave it empty, the script registers global commands instead.
 10. `SYSTEM_PROMPT`
-    Optional top-level custom prompt.
-    Leave empty unless you intentionally want to override the default behavior.
+    Optional custom prompt extension.
+    This text is appended to the built-in global prompt and does not replace the built-in instructions.
 11. `BOT_SYSTEM_PROMPT`
     Backward-compatible alias for old deployments.
-    Prefer `SYSTEM_PROMPT` for new setups.
+    It behaves the same way as `SYSTEM_PROMPT`: additive, not replacing the built-in prompt.
 12. `DOSU_MCP_DEPLOYMENT_ID`
     Recommended Dosu config input if you use the standard deployment-based MCP URL.
 13. `DOSU_MCP_API_KEY`
@@ -160,7 +160,7 @@ To force a specific guild:
 npm run discord:register -- --guild 123456789012345678
 ```
 
-Registered commands come from [src/discord/commands.json](/Users/minibanana/Program/POC/spectre-one/src/discord/commands.json):
+Registered commands come from [src/discord/commands.json](src/discord/commands.json):
 
 - Message context menu: `Ask Spectre about this`
 - `/ask prompt:<text> model:<optional> private:<optional>`
@@ -191,7 +191,7 @@ This worker responds to `PING` and verifies the request signature using `DISCORD
 ### 7. Apply the D1 migration
 
 The incident intake flow stores reports in the `incident_reports` table in Cloudflare D1.
-This repository already includes the migration file in [migrations/0001_create_incident_reports.sql](/Users/minibanana/Program/POC/spectre-one/migrations/0001_create_incident_reports.sql) and the Worker binding in [wrangler.jsonc](/Users/minibanana/Program/POC/spectre-one/wrangler.jsonc).
+This repository already includes the migration file in [migrations/0001_create_incident_reports.sql](migrations/0001_create_incident_reports.sql) and the Worker binding in [wrangler.jsonc](wrangler.jsonc).
 
 Apply it before the first production deploy:
 
@@ -225,15 +225,33 @@ After deployment:
 - `/ask` defers immediately, then the worker edits the original interaction response after OpenAI + Dosu complete.
 - Long replies are split into multiple Discord messages automatically.
 - `private:true` makes the response ephemeral.
-- `/health check_upstream:true` performs a real Dosu tool verification against the selected model.
+- `/health` returns only `OK`.
+- `/health check_upstream:true` performs a real Dosu tool verification and returns only `OK` or `FAIL`.
 
 ## Generic API
 
 ### `GET /health`
 
-Returns worker status.
+Returns a minimal health payload only:
 
-Add `?check=upstream` to verify the default model can load the Dosu MCP tools.
+```json
+{ "ok": true }
+```
+
+Add `?check=upstream` to run a real OpenAI + Dosu verification.
+That endpoint still returns only:
+
+```json
+{ "ok": true }
+```
+
+or:
+
+```json
+{ "ok": false }
+```
+
+with HTTP `503` on upstream failure.
 
 ### `POST /v1/reply`
 
@@ -258,4 +276,5 @@ Add `?check=upstream` to verify the default model can load the Dosu MCP tools.
 
 - `OPENAI_MODELS` is the canonical model configuration.
 - `OPENAI_MODEL` is still accepted as a backward-compatible single-model alias.
+- `SYSTEM_PROMPT` and `BOT_SYSTEM_PROMPT` extend the built-in global prompt; they do not replace it.
 - The current Dosu integration uses HTTP MCP: `server_url + X-Dosu-API-Key`, not the CLI.

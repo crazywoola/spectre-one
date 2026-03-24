@@ -373,16 +373,7 @@ function handleHealthInteraction(
   const requestedModel = getStringOption(interaction, 'model');
 
   if (!checkUpstream) {
-    return json(
-      ephemeralMessage(
-        [
-          'Spectre One is online.',
-          `Configured models: ${env.OPENAI_MODELS || env.OPENAI_MODEL || '(not configured)'}`,
-          `Dosu source: ${resolveDosuSource(env)}`,
-          'Run `/health check_upstream:true` for an end-to-end OpenAI + Dosu check.'
-        ].join('\n')
-      )
-    );
+    return json(ephemeralMessage('OK'));
   }
 
   executionCtx.waitUntil(
@@ -534,15 +525,10 @@ async function processUpstreamHealthCheck(input: {
   try {
     const config = loadConfig(env);
     const replyService = new ReplyService(config);
-    const verifiedModel = await replyService.verifyDosuTools(requestedModel);
+    await replyService.verifyDosuTools(requestedModel);
 
     await editOriginalInteractionResponse(interaction, {
-      content: [
-        'Upstream check passed.',
-        `Verified model: ${verifiedModel}`,
-        `Configured models: ${config.openai.models.join(', ')}`,
-        `Dosu source: ${config.dosu.source}`
-      ].join('\n'),
+      content: 'OK',
       allowed_mentions: { parse: [] }
     });
   } catch (error) {
@@ -552,10 +538,7 @@ async function processUpstreamHealthCheck(input: {
     });
 
     await safeEditOriginalInteractionResponse(interaction, {
-      content:
-        error instanceof Error
-          ? `Upstream check failed: ${error.message}`
-          : 'Upstream check failed.',
+      content: 'FAIL',
       allowed_mentions: { parse: [] }
     });
   }
@@ -930,18 +913,6 @@ function getBooleanOption(interaction: DiscordInteraction, name: string): boolea
 function getInteractionUserName(interaction: DiscordInteraction): string {
   const user = interaction.member?.user ?? interaction.user;
   return user?.global_name ?? user?.username ?? 'discord-user';
-}
-
-function resolveDosuSource(env: WorkerBindings): string {
-  if (env.DOSU_MCP_SERVER_URL) {
-    return 'server_url';
-  }
-
-  if (env.DOSU_MCP_DEPLOYMENT_ID) {
-    return 'deployment_id';
-  }
-
-  return 'not configured';
 }
 
 function deferredMessage(isPrivate: boolean): { type: number; data?: { flags?: number } } {

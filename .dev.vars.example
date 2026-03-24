@@ -13,10 +13,11 @@ DISCORD_BOT_TOKEN=
 # faster iteration. Leave empty to register global commands instead.
 DISCORD_GUILD_ID=
 
-# Preferred prompt override key for the Workers API.
+# Preferred prompt extension key for the Workers API.
+# This text is appended to the built-in global prompt.
 SYSTEM_PROMPT=
 
-# Backward-compatible alias. Use SYSTEM_PROMPT for new deployments.
+# Backward-compatible alias. Also additive, not replacing the built-in prompt.
 BOT_SYSTEM_PROMPT=
 
 # Dosu HTTP MCP config.
